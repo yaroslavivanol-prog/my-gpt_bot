@@ -17,6 +17,7 @@ CHANNEL_LINK = "https://t.me/claude_gpt_deepseek"
 BOT_LINK = "https://t.me/claude_gpt_deepseek_bot"
 LIMIT_PER_HOUR = 10
 RESET_INTERVAL = 3600
+HISTORY_LIMIT = 5  # сколько сообщений бот помнит
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 logging.basicConfig(level=logging.INFO)
@@ -28,27 +29,17 @@ user_data = defaultdict(lambda: {
     "reset_time": 0,
     "bonus": 0,
     "referred_by": None,
-    "is_busy": False
+    "is_busy": False,
+    "mode": "chat",  # chat / code
+    "history": []    # список {"role": "...", "content": "..."}
 })
 
-# --- ПРОВЕРКА ПОДПИСКИ ---
+# --- ПРОВЕРКА ПОДПИСКИ (пока отключена) ---
 async def check_subscription(user_id, context):
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            return True
-    except Exception as e:
-        logging.error(f"Ошибка проверки подписки: {e}")
-    return False
+    return True  # ВРЕМЕННО: все проходят без подписки
 
 # --- КЛАВИАТУРЫ ---
-def get_subscribe_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")]
-    ])
-
-def get_main_keyboard(current_model="DeepSeek"):
+def get_main_keyboard(current_model="DeepSeek", mode="chat"):
     models = [
         ("🐋 DeepSeek", "set_deepseek", "DeepSeek"),
         ("⚡ Grok", "set_grok", "Grok"),
@@ -58,11 +49,18 @@ def get_main_keyboard(current_model="DeepSeek"):
     for label, callback, name in models:
         prefix = "✅ " if name == current_model else ""
         keyboard.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=callback)])
+    # Режим
+    mode_label = "💻 Режим: Код" if mode == "code" else "💬 Режим: Чат"
+    keyboard.append([InlineKeyboardButton(mode_label, callback_data="toggle_mode")])
+    # Меню
     keyboard.append([
         InlineKeyboardButton("📊 Профиль", callback_data="profile"),
         InlineKeyboardButton("❓ Помощь", callback_data="help")
     ])
-    keyboard.append([InlineKeyboardButton("📤 Поделиться ботом", callback_data="share")])
+    keyboard.append([
+        InlineKeyboardButton("🧹 Очистить историю", callback_data="clear_history"),
+        InlineKeyboardButton("📤 Поделиться", callback_data="share")
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 def get_limit_keyboard():
@@ -71,6 +69,10 @@ def get_limit_keyboard():
         [InlineKeyboardButton("👥 Пригласить друга (+10)", callback_data="invite")],
         [InlineKeyboardButton("📊 Профиль", callback_data="profile")]
     ])
+
+# --- СИСТЕМНЫЕ ПРОМПТЫ ---
+SYSTEM_CHAT = "Ты полезный AI-ассистент. Отвечай кратко, по делу, на русском."
+SYSTEM_CODE = "Ты опытный программист. Помогай с кодом: пиши, объясняй, находи ошибки. Отвечай на русском, код — в блоках ```."
 
 # --- ХЕНДЛЕРЫ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,14 +96,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["requests"] = 0
         user_data[user_id]["reset_time"] = now
 
-    if not await check_subscription(user_id, context):
-        await update.message.reply_text(
-            "👋 Добро пожаловать!\n\nЧтобы пользоваться ботом, подпишитесь на канал:\n"
-            f"👉 {CHANNEL_ID}\n\nПосле подписки нажмите кнопку ниже.",
-            reply_markup=get_subscribe_keyboard()
-        )
-        return
-
     info = user_data[user_id]
     total = LIMIT_PER_HOUR + info["bonus"]
     left = total - info["requests"]
@@ -111,32 +105,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Осталось запросов: *{left}*\n\n"
         "Выбери модель или напиши вопрос 👇",
         parse_mode="Markdown",
-        reply_markup=get_main_keyboard(info["model_name"])
+        reply_markup=get_main_keyboard(info["model_name"], info["mode"])
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
-
-    if data == "check_sub":
-        if await check_subscription(user_id, context):
-            await query.answer("✅ Спасибо за подписку!", show_alert=False)
-            info = user_data[user_id]
-            await query.edit_message_text(
-                f"✅ *Спасибо за подписку!*\n\n"
-                f"Текущая модель: *{info['model_name']}*\n\n"
-                "Напиши свой вопрос.",
-                parse_mode="Markdown",
-                reply_markup=get_main_keyboard(info["model_name"])
-            )
-        else:
-            await query.answer("❌ Вы ещё не подписались!", show_alert=True)
-        return
-
-    if not await check_subscription(user_id, context):
-        await query.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
-        return
 
     if data.startswith("set_"):
         model_map = {
@@ -147,15 +122,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         model_id, model_name = model_map.get(data, ("deepseek-v4-pro", "DeepSeek"))
         user_data[user_id]["model"] = model_id
         user_data[user_id]["model_name"] = model_name
+        user_data[user_id]["history"] = []  # сброс истории при смене модели
         await query.answer(f"Модель: {model_name}")
         info = user_data[user_id]
         total = LIMIT_PER_HOUR + info["bonus"]
         left = total - info["requests"]
         await query.edit_message_text(
             f"✅ *Модель изменена на {model_name}*\n\n"
-            f"Осталось запросов: *{left}*\n\nНапиши свой вопрос.",
+            f"Осталось запросов: *{left}*\n\nИстория диалога сброшена.\nНапиши свой вопрос.",
             parse_mode="Markdown",
-            reply_markup=get_main_keyboard(model_name)
+            reply_markup=get_main_keyboard(model_name, info["mode"])
+        )
+        return
+
+    if data == "toggle_mode":
+        info = user_data[user_id]
+        info["mode"] = "code" if info["mode"] == "chat" else "chat"
+        info["history"] = []
+        mode_text = "💻 Код" if info["mode"] == "code" else "💬 Чат"
+        await query.answer(f"Режим: {mode_text}")
+        total = LIMIT_PER_HOUR + info["bonus"]
+        left = total - info["requests"]
+        await query.edit_message_text(
+            f"✅ *Режим изменён на {mode_text}*\n\n"
+            f"История очищена.\nНапиши свой вопрос.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(info["model_name"], info["mode"])
+        )
+        return
+
+    if data == "clear_history":
+        user_data[user_id]["history"] = []
+        await query.answer("🧹 История очищена!", show_alert=False)
+        info = user_data[user_id]
+        total = LIMIT_PER_HOUR + info["bonus"]
+        left = total - info["requests"]
+        await query.edit_message_text(
+            f"🧹 *История очищена*\n\n"
+            f"Модель: *{info['model_name']}*\n"
+            f"Осталось запросов: *{left}*\n\nНачни новый диалог 👇",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(info["model_name"], info["mode"])
         )
         return
 
@@ -163,13 +170,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = user_data[user_id]
         total = LIMIT_PER_HOUR + info["bonus"]
         ref_link = f"{BOT_LINK}?start={user_id}"
+        history_count = len(info["history"])
         await query.edit_message_text(
             f"📊 *Ваш профиль*\n\n"
             f"Модель: *{info['model_name']}*\n"
+            f"Режим: *{'Код' if info['mode'] == 'code' else 'Чат'}*\n"
             f"Использовано: {info['requests']} / {total}\n"
-            f"Бонусные запросы: +{info['bonus']}\n\n"
-            f"🔗 Ваша реф-ссылка:\n`{ref_link}`\n\n"
-            "За каждого друга — +10 запросов!",
+            f"Бонусные запросы: +{info['bonus']}\n"
+            f"Сообщений в истории: {history_count}\n\n"
+            f"🔗 Ваша реф-ссылка:\n`{ref_link}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 Пригласить друга", callback_data="invite")],
@@ -181,15 +190,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "help":
         await query.edit_message_text(
             "❓ *Помощь*\n\n"
-            "📌 *Как пользоваться ботом:*\n"
+            "📌 *Как пользоваться:*\n"
             "1. Выбери модель (DeepSeek, Grok, Qwen)\n"
-            "2. Напиши вопрос — получи ответ\n"
-            "3. У тебя 10 бесплатных запросов в час\n\n"
-            "🎁 *Как получить больше:*\n"
-            "• Пригласи друга — +10 запросов\n"
-            "• Подписка 299 ₽/мес (скоро)\n\n"
-            "📢 *Подписка на канал обязательна:*\n"
-            f"{CHANNEL_LINK}",
+            "2. Выбери режим: 💬 Чат или 💻 Код\n"
+            "3. Напиши вопрос — получи ответ\n\n"
+            "🧠 *Бот помнит последние 5 сообщений* — можно вести диалог.\n"
+            "🧹 *Очистить историю* — начать заново.\n\n"
+            "📊 *Лимит:* 10 запросов в час\n"
+            "👥 *+10 за друга* по реф-ссылке\n\n"
+            "📢 Канал: " + CHANNEL_LINK,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("◀️ Назад", callback_data="back")]
@@ -200,11 +209,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "share":
         share_text = "🤖 Попробуй бота с нейросетями — DeepSeek, Grok, Qwen!\n\n10 запросов в час бесплатно."
         share_url = f"https://t.me/share/url?url={BOT_LINK}&text={share_text}"
-        await query.answer("Спасибо за поддержку! 🙏", show_alert=False)
+        await query.answer("Спасибо! 🙏", show_alert=False)
         await query.edit_message_text(
-            "📤 *Поделиться ботом*\n\n"
-            "Спасибо, что помогаешь проекту!\n\n"
-            "Нажми кнопку ниже — и выбери чат, куда отправить.",
+            "📤 *Поделиться ботом*\n\nСпасибо за поддержку!",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤 Поделиться", url=share_url)],
@@ -217,9 +224,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref_link = f"{BOT_LINK}?start={user_id}"
         await query.edit_message_text(
             f"🚀 *Получить больше запросов*\n\n"
-            f"Способы:\n"
             f"1️⃣ Пригласите друга — +10 запросов\n"
-            f"2️⃣ Подписка за 299 ₽/мес (скоро)\n\n"
+            f"2️⃣ Подписка 299 ₽/мес (скоро)\n\n"
             f"🔗 Ваша реф-ссылка:\n`{ref_link}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
@@ -251,10 +257,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         left = total - info["requests"]
         await query.edit_message_text(
             f"👋 Главное меню\n\n"
-            f"Текущая модель: *{info['model_name']}*\n"
+            f"Модель: *{info['model_name']}* · Режим: *{'Код' if info['mode'] == 'code' else 'Чат'}*\n"
             f"Осталось запросов: *{left}*\n\nВыбери модель или напиши вопрос 👇",
             parse_mode="Markdown",
-            reply_markup=get_main_keyboard(info["model_name"])
+            reply_markup=get_main_keyboard(info["model_name"], info["mode"])
         )
         return
 
@@ -263,20 +269,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
 
-    # --- АНТИ-СПАМ: пока бот занят — удаляем сообщение ---
+    # --- АНТИ-СПАМ: игнорируем, пока бот занят ---
     if user_data[user_id]["is_busy"]:
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-        return
-
-    if not await check_subscription(user_id, context):
-        await update.message.reply_text(
-            f"❌ *Доступ закрыт*\n\nПодпишитесь на канал:\n👉 {CHANNEL_ID}",
-            parse_mode="Markdown",
-            reply_markup=get_subscribe_keyboard()
-        )
         return
 
     now = time.time()
@@ -290,10 +284,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if was_exhausted:
             await update.message.reply_text(
                 "✅ *Лимит обновился!*\n\n"
-                f"У вас снова {LIMIT_PER_HOUR} запросов.\n"
-                "Можете задавать вопросы!",
+                f"У вас снова {LIMIT_PER_HOUR} запросов.",
                 parse_mode="Markdown",
-                reply_markup=get_main_keyboard(data["model_name"])
+                reply_markup=get_main_keyboard(data["model_name"], data["mode"])
             )
 
     total_limit = LIMIT_PER_HOUR + data["bonus"]
@@ -301,27 +294,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⚠️ *Лимит исчерпан*\n\n"
             f"Вы использовали все {total_limit} запросов в час.\n\n"
-            f"Лимит обновится через {int((data['reset_time'] + RESET_INTERVAL - now) / 60)} мин.\n\n"
-            f"Или получите больше прямо сейчас 👇",
+            f"Лимит обновится через {int((data['reset_time'] + RESET_INTERVAL - now) / 60)} мин.",
             parse_mode="Markdown",
             reply_markup=get_limit_keyboard()
         )
         return
 
-    # --- БЛОКИРУЕМ ЮЗЕРА НА ВРЕМЯ ОТВЕТА ---
+    # --- ФОРМИРУЕМ ИСТОРИЮ ДИАЛОГА ---
+    system_prompt = SYSTEM_CODE if data["mode"] == "code" else SYSTEM_CHAT
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(data["history"][-HISTORY_LIMIT:])  # последние 5
+    messages.append({"role": "user", "content": user_text})
+
+    # --- БЛОКИРУЕМ НА ВРЕМЯ ОТВЕТА ---
     data["is_busy"] = True
     try:
         await update.message.chat.send_action(action="typing")
         response = client.chat.completions.create(
             model=data["model"],
-            messages=[{"role": "user", "content": user_text}]
+            messages=messages
         )
         data["requests"] += 1
-        left_new = total_limit - data["requests"]
         answer = response.choices[0].message.content
+
+        # Сохраняем в историю
+        data["history"].append({"role": "user", "content": user_text})
+        data["history"].append({"role": "assistant", "content": answer})
+        # Обрезаем, чтобы не разрасталась
+        if len(data["history"]) > HISTORY_LIMIT * 2:
+            data["history"] = data["history"][-HISTORY_LIMIT * 2:]
+
+        left_new = total_limit - data["requests"]
         await update.message.reply_text(
             f"{answer}\n\n"
-            f"_Модель: {data['model_name']} · Осталось: {left_new} запросов_",
+            f"_Модель: {data['model_name']} · Режим: {'Код' if data['mode'] == 'code' else 'Чат'} · Осталось: {left_new}_",
             parse_mode="Markdown"
         )
     except Exception as e:

@@ -16,13 +16,14 @@ logging.basicConfig(level=logging.INFO)
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
+    
     if not query:
         return
 
     try:
-        # ИСПОЛЬЗУЕМ ID МОДЕЛИ ИЗ БОТА ИИШКО
+        # ТОЧНЫЙ ID ИЗ ТВОЕГО КАТАЛОГА ИИШКО
         response = client.chat.completions.create(
-            model="deepseek-v4.1-flash", 
+            model="deepseek-v4.1-flash-1017", 
             messages=[{"role": "user", "content": query}],
             temperature=0.8
         )
@@ -40,7 +41,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
     except Exception as e:
         logging.error(f"Ошибка API: {e}")
-        # Выводим ошибку в меню, чтобы ты её увидел
+        # Если ошибка, выводим её в меню, чтобы ты её видел
         results = [
             InlineQueryResultArticle(
                 id="err",

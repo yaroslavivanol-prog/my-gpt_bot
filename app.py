@@ -4,10 +4,14 @@ from threading import Thread
 from flask import Flask
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import Application, InlineQueryHandler, ContextTypes
+from openai import OpenAI
 
-# --- ТОКЕН ---
+# --- ТВОИ НАСТРОЙКИ ---
 TELEGRAM_TOKEN = "8331451571:AAGTJuw2hyBnQH6ow7EavScntrHwdgO2SYQ"
+API_KEY = "sk-185f3c2b8f83b9e2a644ed5b1e43e712dc126e02542bacb8"
+BASE_URL = "https://api.reformboss.com/v1"
 
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 logging.basicConfig(level=logging.INFO)
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15,18 +19,37 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not query:
         return
 
-    # ТУТ НЕТ НИКАКОГО API. ПРОСТО ТЕСТОВЫЙ ОТВЕТ.
-    results = [
-        InlineQueryResultArticle(
-            id="1",
-            title="ТЕСТ: Нажми чтобы отправить",
-            description="Бот работает без API!",
-            input_message_content=InputTextMessageContent(
-                message_text=f"Твой запрос: '{query}'. Бот работает!"
-            )
+    try:
+        # ИСПОЛЬЗУЕМ ID МОДЕЛИ ИЗ БОТА ИИШКО
+        response = client.chat.completions.create(
+            model="deepseek-v4.1-flash", 
+            messages=[{"role": "user", "content": query}],
+            temperature=0.8
         )
-    ]
-    await update.inline_query.answer(results, cache_time=0)
+        answer = response.choices[0].message.content
+
+        results = [
+            InlineQueryResultArticle(
+                id="1",
+                title="Отправить ответ ИИ",
+                description=answer[:100],
+                input_message_content=InputTextMessageContent(message_text=answer)
+            )
+        ]
+        await update.inline_query.answer(results, cache_time=0)
+        
+    except Exception as e:
+        logging.error(f"Ошибка API: {e}")
+        # Выводим ошибку в меню, чтобы ты её увидел
+        results = [
+            InlineQueryResultArticle(
+                id="err",
+                title="⚠️ ОШИБКА API (нажми)",
+                description=str(e)[:100],
+                input_message_content=InputTextMessageContent(message_text=f"Ошибка API: {e}")
+            )
+        ]
+        await update.inline_query.answer(results, cache_time=0)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 flask_app = Flask(__name__)

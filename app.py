@@ -14,18 +14,17 @@ BASE_URL = "https://api.reformboss.com/v1"
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 logging.basicConfig(level=logging.INFO)
 
-# --- ИНЛАЙН РЕЖИМ (ЧИСТЫЙ ЧАТ) ---
+# --- ИНЛАЙН РЕЖИМ ---
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
     
-    # Если запрос пустой, ничего не делаем
     if not query:
         return
 
     try:
         # Отправляем запрос к нейросети
         response = client.chat.completions.create(
-            model="deepseek-v4.1-flash-1017", 
+            model="deepseek-v4.1-flash-1017", # Если не работает, поменяй на "deepseek-chat"
             messages=[{"role": "user", "content": query}],
             temperature=0.8
         )
@@ -36,25 +35,26 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineQueryResultArticle(
                 id="1",
                 title="Отправить ответ ИИ",
-                description=answer[:100], # Первые 100 символов для превью
+                description=answer[:100],
                 input_message_content=InputTextMessageContent(message_text=answer)
             )
         ]
-        # cache_time=0, чтобы не кэшировало и всегда отвечало свежим результатом
         await update.inline_query.answer(results, cache_time=0)
         
     except Exception as e:
-        # Если ошибка API, показываем её
+        logging.error(f"Ошибка API: {e}")
+        # Если ошибка, выводим её прямо в меню, чтобы ты её увидел
         results = [
             InlineQueryResultArticle(
                 id="err",
-                title="Ошибка API",
-                input_message_content=InputTextMessageContent(message_text=f"Ошибка: {e}")
+                title="⚠️ ОШИБКА API (нажми сюда)",
+                description=str(e)[:100],
+                input_message_content=InputTextMessageContent(message_text=f"Ошибка API: {e}")
             )
         ]
         await update.inline_query.answer(results, cache_time=0)
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не падал) ---
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -70,9 +70,6 @@ if __name__ == "__main__":
     
     print("Бот запускается...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Добавляем только обработчик инлайн-запросов
     app.add_handler(InlineQueryHandler(inline_query_handler))
-    
     print("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
